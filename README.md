@@ -1,121 +1,104 @@
-# 📄 Contract Radar
+# Contract Radar 📡
 
-> **Centralize all your vendor contracts and subscriptions. Get renewal alerts before it's too late.**
+> Contract expiry tracker that monitors your vendor and client agreements, extracts key dates from contract text, and sends automated renewal alerts — so critical contracts never slip through the cracks.
 
-## Problem It Solves
+## The Problem
 
-SMBs typically manage 20–50+ vendor contracts, software subscriptions, and leases spread across email threads, shared drives, and sticky notes. Contracts auto-renew unexpectedly (costing thousands), or lapse without notice (causing service disruptions). Contract Radar gives you a single place to track every contract, with automated email alerts sent to the right person at the right time — 30, 60, or 90 days before expiry.
+Small and mid-size businesses manage dozens of contracts (SaaS subscriptions, vendor agreements, client retainers, leases, NDAs) across email threads, Dropbox folders, and spreadsheets. Missing a contract renewal means either unexpected auto-charges, service disruptions, or lost leverage during renegotiation. Dedicated CLM (Contract Lifecycle Management) tools like Ironclad or DocuSign CLM cost $30K+/year.
 
 ## Features
 
-- **Contract registry** — Store all contracts with vendor, type, value, expiry, and owner
-- **Smart alerts** — Per-contract configurable notice windows (default 30 days)
-- **Dashboard** — Instant overview of active/expired contracts and MRR at risk
-- **Renewal calendar** — Group upcoming renewals by month
-- **Auto-renew tracking** — Flag contracts that need cancellation before expiry
-- **Weekly summary email** — One-page digest of all upcoming renewals
-- **Multi-type support** — Software, services, leases, NDA, employment contracts
-- **Owner assignment** — Route alerts to the right team member per contract
+- **Contract registry** — store all contracts with counterparty, dates, value, and renewal type
+- **Automatic date extraction** — paste contract text and the parser extracts expiry and start dates using regex (no manual entry)
+- **Multi-threshold alerts** — get emailed at 30, 14, and 7 days before expiry (configurable per contract)
+- **Per-contract email routing** — different alerts for different people (legal team, finance, ops)
+- **Visual urgency indicators** — color-coded dashboard (critical/expiring soon/watch/active)
+- **Contract value tracking** — see total portfolio value and MRR at risk
+- **Renewal management** — one-click renewal to extend any contract with a new end date
+- **REST API** — integrate with your existing tools
+- **Daily automated check** — runs every morning at 8am UTC
 
 ## Tech Stack
 
-- **Backend:** Python 3.11 + FastAPI
-- **Email:** SMTP (works with Gmail, SendGrid, Mailgun)
-- **Database:** In-memory (MVP) — swap to PostgreSQL for production
+- **Python 3.11+** / FastAPI
+- **SQLite** — zero-config local storage
+- **APScheduler** — daily cron for expiry checks
+- **Regex date extraction** — no paid AI/OCR services needed
+- **SMTP** — works with any email provider
 
 ## Installation
 
 ```bash
 git clone https://github.com/Everaldtah/contract-radar
 cd contract-radar
-python -m venv venv && source venv/bin/activate
+
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
 cp .env.example .env
+# Edit .env with your SMTP credentials
+
+python main.py
 ```
+
+App runs at **http://localhost:8002**
 
 ## Usage
 
-### Start the server
-```bash
-uvicorn main:app --reload --port 8002
-```
+### Add a Contract Manually
+Fill in the form on the dashboard — title, counterparty, and end date are required.
 
-### 1. Add a contract
+### Auto-Extract Dates from Contract Text
+Paste contract text into the "Contract Text" field — the parser will extract start and end dates automatically using keyword and pattern matching.
+
+### Reminder Schedule
+Default reminders: **30 days**, **14 days**, **7 days** before expiry. Customize per contract by changing the "Reminder Days" field (comma-separated).
+
+### API Examples
+
 ```bash
+# Add a contract
 curl -X POST http://localhost:8002/contracts \
-  -H "X-API-Key: changeme" \
   -H "Content-Type: application/json" \
   -d '{
-    "vendor_name": "Salesforce",
-    "contract_type": "software",
-    "annual_value": 36000,
-    "expiry_date": "2025-09-30",
-    "auto_renews": false,
-    "renewal_notice_days": 60,
-    "owner_email": "sales@company.com"
+    "title": "AWS Annual Commitment",
+    "counterparty": "Amazon Web Services",
+    "end_date": "2025-01-31",
+    "value": 48000,
+    "renewal_type": "manual",
+    "email_alerts": "devops@co.com,finance@co.com",
+    "reminder_days": "60,30,14,7"
   }'
-```
 
-### 2. View dashboard
-```bash
-curl http://localhost:8002/dashboard -H "X-API-Key: changeme"
-```
+# List contracts expiring in next 90 days
+curl http://localhost:8002/upcoming?days=90
 
-### 3. Get contracts expiring soon
-```bash
-curl "http://localhost:8002/contracts?expiring_within_days=30" \
-  -H "X-API-Key: changeme"
-```
-
-### 4. Trigger expiry alerts
-```bash
-curl -X POST http://localhost:8002/alerts/check \
-  -H "X-API-Key: changeme" \
+# Extract dates from contract text
+curl -X POST http://localhost:8002/extract-dates \
   -H "Content-Type: application/json" \
-  -d '{"alert_email": "ops@company.com", "default_notice_days": 30}'
+  -d '{"text": "This agreement shall terminate on December 31, 2025..."}'
+
+# Trigger alert check manually
+curl -X POST http://localhost:8002/alerts/run
 ```
 
-### 5. Get renewal calendar
-```bash
-curl "http://localhost:8002/contracts/report/calendar?months_ahead=3" \
-  -H "X-API-Key: changeme"
-```
+## Date Extraction
 
-### 6. Seed demo data
-```bash
-python seed_demo.py
-```
+The parser recognizes these formats:
+- `January 15, 2025` / `Jan 15 2025`
+- `2025-01-15` (ISO 8601)
+- `01/15/2025`
+- `15.01.2025`
+- `15th day of January, 2025`
 
-### API Docs
-`http://localhost:8002/docs`
-
-## API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/contracts` | Add a contract |
-| GET | `/contracts` | List all (with filters) |
-| GET | `/contracts/{id}` | Get a contract |
-| PATCH | `/contracts/{id}` | Update a contract |
-| DELETE | `/contracts/{id}` | Remove a contract |
-| GET | `/dashboard` | Overview stats |
-| GET | `/contracts/report/calendar` | Renewal calendar by month |
-| POST | `/alerts/check` | Send expiry alerts now |
-| POST | `/alerts/summary` | Send weekly summary email |
+And finds dates near keywords like: *expires*, *termination date*, *effective date*, *valid through*, *end date*
 
 ## Monetization Model
 
-| Plan | Price | Features |
-|------|-------|----------|
-| Free | $0 | Up to 10 contracts, manual alerts |
-| Professional | $29/mo | 100 contracts, automated alerts, email reports |
-| Business | $79/mo | Unlimited contracts, Slack integration, CSV export |
-| Agency | $199/mo | Multi-company, white-label, API access |
+- **Free**: Up to 10 contracts, email alerts
+- **Starter** ($19/mo): Up to 100 contracts, PDF text extraction, multi-user
+- **Business** ($49/mo): Unlimited contracts, PDF/DOCX upload, team roles, Google Drive integration, contract templates
+- **Agency** ($129/mo): White-label, client portals, API access, Zapier integration, audit trail
 
-**Target customers:** Operations managers, CFOs, and founders at 10–500 person companies. Especially valuable for companies with SaaS-heavy stacks or commercial leases.
-
-**Go-to-market:** Cold email outreach to CFOs with subject line: "You're probably missing a contract renewal this quarter."
-
-## License
-
-MIT
+**Target market**: Legal ops teams, procurement, startup founders, SMBs managing vendor relationships, real estate (lease tracking), and accounting firms managing client contracts.
