@@ -1,104 +1,124 @@
-# Contract Radar 📡
+# Contract Radar
 
-> Contract expiry tracker that monitors your vendor and client agreements, extracts key dates from contract text, and sends automated renewal alerts — so critical contracts never slip through the cracks.
+**Never get auto-renewed into a contract you forgot about.** Contract Radar tracks all your vendor contracts, extracts key renewal dates, and sends alerts before you miss a deadline.
 
 ## The Problem
 
-Small and mid-size businesses manage dozens of contracts (SaaS subscriptions, vendor agreements, client retainers, leases, NDAs) across email threads, Dropbox folders, and spreadsheets. Missing a contract renewal means either unexpected auto-charges, service disruptions, or lost leverage during renegotiation. Dedicated CLM (Contract Lifecycle Management) tools like Ironclad or DocuSign CLM cost $30K+/year.
+Freelancers and small agencies manage dozens of vendor contracts — SaaS subscriptions, office leases, service agreements, retainers. These are scattered across email threads, shared drives, and Notion pages. Companies get hit with surprise auto-renewals and miss opt-out windows, costing thousands. A single missed cancellation on an annual SaaS contract can cost $12,000+.
 
-## Features
+## What It Does
 
-- **Contract registry** — store all contracts with counterparty, dates, value, and renewal type
-- **Automatic date extraction** — paste contract text and the parser extracts expiry and start dates using regex (no manual entry)
-- **Multi-threshold alerts** — get emailed at 30, 14, and 7 days before expiry (configurable per contract)
-- **Per-contract email routing** — different alerts for different people (legal team, finance, ops)
-- **Visual urgency indicators** — color-coded dashboard (critical/expiring soon/watch/active)
-- **Contract value tracking** — see total portfolio value and MRR at risk
-- **Renewal management** — one-click renewal to extend any contract with a new end date
-- **REST API** — integrate with your existing tools
-- **Daily automated check** — runs every morning at 8am UTC
+- **Dashboard** — all contracts at a glance with color-coded urgency (red = expiring soon)
+- **Manual entry** — fill out a simple form with key dates and terms
+- **Smart text parser** — paste raw contract text and auto-extract dates, vendor name, value, notice periods
+- **Countdown timers** — days until expiry shown on every card
+- **Renewal deadline calculator** — "you must decide by [date]" based on notice period
+- **Alert banner** — immediate warning for contracts expiring within 30 days
+- **REST API** — integrate with your existing workflows
+- **Tagging system** — organize by category (cloud, lease, legal, etc.)
 
 ## Tech Stack
 
-- **Python 3.11+** / FastAPI
-- **SQLite** — zero-config local storage
-- **APScheduler** — daily cron for expiry checks
-- **Regex date extraction** — no paid AI/OCR services needed
-- **SMTP** — works with any email provider
+- **Framework**: Next.js 14 (React)
+- **Styling**: Tailwind CSS
+- **Parser**: Custom regex-based contract text extractor
+- **Data**: In-memory (swap for PostgreSQL + Prisma)
 
 ## Installation
 
 ```bash
-git clone https://github.com/Everaldtah/contract-radar
+git clone https://github.com/Everaldtah/contract-radar.git
 cd contract-radar
-
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
+npm install
 cp .env.example .env
-# Edit .env with your SMTP credentials
-
-python main.py
+npm run dev
 ```
 
-App runs at **http://localhost:8002**
+Open http://localhost:3000
 
 ## Usage
 
-### Add a Contract Manually
-Fill in the form on the dashboard — title, counterparty, and end date are required.
+### Web UI
 
-### Auto-Extract Dates from Contract Text
-Paste contract text into the "Contract Text" field — the parser will extract start and end dates automatically using keyword and pattern matching.
+1. Open the app and see pre-loaded demo contracts
+2. Click **Manual Entry** to add a contract with specific dates
+3. Click **Paste Text** to auto-parse a contract
+4. Filter by "Expiring", "Active", or "Expired"
+5. Delete contracts with the × button
 
-### Reminder Schedule
-Default reminders: **30 days**, **14 days**, **7 days** before expiry. Customize per contract by changing the "Reminder Days" field (comma-separated).
+### API
 
-### API Examples
-
+**List all contracts:**
 ```bash
-# Add a contract
-curl -X POST http://localhost:8002/contracts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "AWS Annual Commitment",
-    "counterparty": "Amazon Web Services",
-    "end_date": "2025-01-31",
-    "value": 48000,
-    "renewal_type": "manual",
-    "email_alerts": "devops@co.com,finance@co.com",
-    "reminder_days": "60,30,14,7"
-  }'
-
-# List contracts expiring in next 90 days
-curl http://localhost:8002/upcoming?days=90
-
-# Extract dates from contract text
-curl -X POST http://localhost:8002/extract-dates \
-  -H "Content-Type: application/json" \
-  -d '{"text": "This agreement shall terminate on December 31, 2025..."}'
-
-# Trigger alert check manually
-curl -X POST http://localhost:8002/alerts/run
+curl http://localhost:3000/api/contracts
 ```
 
-## Date Extraction
+**Get contracts expiring within 30 days:**
+```bash
+curl "http://localhost:3000/api/contracts?expiring_within=30"
+```
 
-The parser recognizes these formats:
-- `January 15, 2025` / `Jan 15 2025`
-- `2025-01-15` (ISO 8601)
-- `01/15/2025`
-- `15.01.2025`
-- `15th day of January, 2025`
+**Add a contract manually:**
+```bash
+curl -X POST http://localhost:3000/api/contracts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "GitHub Teams Plan",
+    "vendor": "GitHub",
+    "startDate": "2025-01-01",
+    "endDate": "2026-12-31",
+    "renewalNotice": 30,
+    "contractValue": 1188,
+    "autoRenews": true,
+    "tags": ["dev-tools", "saas"]
+  }'
+```
 
-And finds dates near keywords like: *expires*, *termination date*, *effective date*, *valid through*, *end date*
+**Parse contract from raw text:**
+```bash
+curl -X POST http://localhost:3000/api/contracts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "raw_text": "Service Agreement between Acme Corp and Vendor Inc. Effective Date: January 1, 2025. Expiration: December 31, 2026. Total value: $24,000. Auto-renewal: 60 days written notice required."
+  }'
+```
+
+## Contract Fields
+
+| Field | Description |
+|-------|-------------|
+| title | Contract name |
+| vendor | Vendor/supplier name |
+| startDate | Contract start (YYYY-MM-DD) |
+| endDate | Contract end (YYYY-MM-DD) |
+| renewalNotice | Days of notice required to cancel/not-renew |
+| contractValue | Annual or total contract value in USD |
+| autoRenews | Whether the contract auto-renews |
+| tags | Categories for filtering |
+| notes | Free-text notes |
 
 ## Monetization Model
 
-- **Free**: Up to 10 contracts, email alerts
-- **Starter** ($19/mo): Up to 100 contracts, PDF text extraction, multi-user
-- **Business** ($49/mo): Unlimited contracts, PDF/DOCX upload, team roles, Google Drive integration, contract templates
-- **Agency** ($129/mo): White-label, client portals, API access, Zapier integration, audit trail
+| Plan | Price | Features |
+|------|-------|----------|
+| Free | $0 | Up to 5 contracts, email alerts |
+| Pro | $12/mo | Unlimited contracts, Slack alerts, PDF import |
+| Team | $29/mo | 5 seats, shared workspace, audit log |
+| Agency | $79/mo | Unlimited seats, client portals, API access |
 
-**Target market**: Legal ops teams, procurement, startup founders, SMBs managing vendor relationships, real estate (lease tracking), and accounting firms managing client contracts.
+**Target customers**: Freelancers, small agencies, operations managers, legal teams at startups.
+
+**Unit economics**: The average freelancer manages 8–15 active contracts. Missing one auto-renewal = $500–$10,000 loss. This tool pays for itself in one saved cancellation.
+
+## Roadmap
+
+- [ ] PDF upload with text extraction (pdf-parse)
+- [ ] Email digest — weekly contract health report
+- [ ] Slack / Teams integration
+- [ ] Calendar sync (Google Calendar reminders)
+- [ ] Team sharing and permissions
+- [ ] AI-powered contract summarization
+
+## License
+
+MIT
