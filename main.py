@@ -1,419 +1,332 @@
+"""
+Contract Radar - Vendor contract & subscription renewal alert tracker for SMBs
+"""
 import os
+import sqlite3
+import smtplib
+import threading
+import time
+import csv
+import io
 from datetime import datetime, timedelta
-from typing import Optional, List
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
+from fastapi import FastAPI, HTTPException, Request, Form, Depends, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
+import uvicorn
 from dotenv import load_dotenv
-
-from database import init_db, get_db
-from parser import extract_dates_from_text
-from email_service import send_expiry_alerts
 
 load_dotenv()
 
-app = FastAPI(title="Contract Radar", description="Contract expiry tracker with renewal alerts")
-scheduler = BackgroundScheduler()
+app = FastAPI(title="Contract Radar", description="Vendor contract renewal alert system")
+
+DB_PATH = os.getenv("DB_PATH", "contracts.db")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", SMTP_USER)
+ALERT_DAYS = [int(d) for d in os.getenv("ALERT_DAYS", "60,30,14,7,1").split(",")]
+
+templates = Jinja2Templates(directory="templates")
 
 
-class ContractCreate(BaseModel):
-    title: str
-    counterparty: str
-    email_alerts: Optional[str] = None
-    contract_text: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: str
-    renewal_type: str = "manual"  # manual, auto-renew, one-time
-    value: Optional[float] = None
-    currency: str = "USD"
-    notes: Optional[str] = None
-    reminder_days: str = "30,14,7"  # Comma-separated days before expiry to alert
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
-class ContractUpdate(BaseModel):
-    title: Optional[str] = None
-    end_date: Optional[str] = None
-    email_alerts: Optional[str] = None
-    notes: Optional[str] = None
-    status: Optional[str] = None
-    reminder_days: Optional[str] = None
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS contracts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor_name TEXT NOT NULL,
+            contract_name TEXT NOT NULL,
+            category TEXT DEFAULT 'Other',
+            start_date TEXT,
+            end_date TEXT NOT NULL,
+            renewal_date TEXT,
+            amount REAL DEFAULT 0,
+            currency TEXT DEFAULT 'USD',
+            billing_cycle TEXT DEFAULT 'Annual',
+            auto_renews INTEGER DEFAULT 0,
+            notice_days INTEGER DEFAULT 30,
+            owner_email TEXT,
+            notes TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id INTEGER NOT NULL,
+            alert_type TEXT NOT NULL,
+            days_until_expiry INTEGER,
+            sent_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (contract_id) REFERENCES contracts(id)
+        );
+    """)
+    conn.commit()
+    conn.close()
 
 
-@app.on_event("startup")
-def startup():
-    init_db()
-    scheduler.add_job(
-        run_expiry_checks,
-        CronTrigger(hour=8, minute=0),
-        id="daily_expiry_check",
-        replace_existing=True,
-    )
-    scheduler.start()
-    print("Contract Radar started — daily expiry check at 8am UTC")
+def send_email(to_email: str, subject: str, body_html: str) -> bool:
+    if not SMTP_USER or not SMTP_PASS:
+        print(f"[EMAIL MOCK] To: {to_email} | Subject: {subject}")
+        return True
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = FROM_EMAIL
+        msg["To"] = to_email
+        msg.attach(MIMEText(body_html, "html"))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(FROM_EMAIL, to_email, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
 
 
-@app.on_event("shutdown")
-def shutdown():
-    scheduler.shutdown()
+def build_alert_email(contracts_by_urgency: dict) -> str:
+    rows = ""
+    for urgency, contracts in contracts_by_urgency.items():
+        color = {"critical": "#e74c3c", "warning": "#f39c12", "info": "#3498db"}.get(urgency, "#333")
+        for c in contracts:
+            days = c["days_until"]
+            rows += f"""
+            <tr>
+              <td style="padding:12px;border-bottom:1px solid #eee;">{c['vendor_name']}</td>
+              <td style="padding:12px;border-bottom:1px solid #eee;">{c['contract_name']}</td>
+              <td style="padding:12px;border-bottom:1px solid #eee;">{c['end_date']}</td>
+              <td style="padding:12px;border-bottom:1px solid #eee;color:{color};font-weight:600;">
+                {"TODAY" if days == 0 else f"{days} day{'s' if days != 1 else ''}" if days > 0 else "EXPIRED"}
+              </td>
+              <td style="padding:12px;border-bottom:1px solid #eee;">{c['currency']} {c['amount']:,.0f}/yr</td>
+              <td style="padding:12px;border-bottom:1px solid #eee;">{'⚠️ Auto-renews' if c['auto_renews'] else 'Manual'}</td>
+            </tr>"""
+
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:20px;">
+    <div style="background:#1a1a2e;color:white;padding:24px;border-radius:12px 12px 0 0;">
+      <h1 style="margin:0;font-size:1.4rem;">📡 Contract Radar Alert</h1>
+      <p style="margin:8px 0 0;color:#a0aec0;font-size:0.9rem;">{datetime.now().strftime('%B %d, %Y')}</p>
+    </div>
+    <div style="background:white;padding:24px;border-radius:0 0 12px 12px;border:1px solid #e2e8f0;border-top:none;">
+      <p>The following contracts require your attention:</p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px;">
+        <thead>
+          <tr style="background:#f7fafc;font-size:0.8rem;color:#4a5568;">
+            <th style="padding:10px 12px;text-align:left;">Vendor</th>
+            <th style="padding:10px 12px;text-align:left;">Contract</th>
+            <th style="padding:10px 12px;text-align:left;">Expires</th>
+            <th style="padding:10px 12px;text-align:left;">Expires In</th>
+            <th style="padding:10px 12px;text-align:left;">Value</th>
+            <th style="padding:10px 12px;text-align:left;">Renewal</th>
+          </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+      </table>
+      <p style="color:#718096;font-size:0.8rem;margin-top:24px;">Sent by Contract Radar</p>
+    </div>
+    </body></html>"""
 
 
-def run_expiry_checks():
-    today = datetime.utcnow().date()
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM contracts WHERE status = 'active'")
-        cols = [d[0] for d in c.description]
-        contracts = [dict(zip(cols, r)) for r in c.fetchall()]
+def check_and_send_alerts():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    today = datetime.now().date()
 
-    alerts_to_send = []
-    for contract in contracts:
-        end = datetime.strptime(contract["end_date"], "%Y-%m-%d").date()
-        days_left = (end - today).days
-        reminder_days = [int(d.strip()) for d in contract.get("reminder_days", "30,14,7").split(",")]
+    contracts = conn.execute(
+        "SELECT * FROM contracts WHERE status = 'active'"
+    ).fetchall()
 
-        for threshold in reminder_days:
-            if days_left == threshold:
-                alerts_to_send.append((contract, days_left))
+    to_alert = {"critical": [], "warning": [], "info": []}
+    alerted_any = False
+
+    for c in contracts:
+        end = datetime.strptime(c["end_date"], "%Y-%m-%d").date()
+        days_until = (end - today).days
+
+        for threshold in ALERT_DAYS:
+            if days_until == threshold:
+                already_sent = conn.execute(
+                    "SELECT id FROM alerts WHERE contract_id = ? AND days_until_expiry = ? AND date(sent_at) = date('now')",
+                    (c["id"], threshold)
+                ).fetchone()
+
+                if not already_sent:
+                    urgency = "critical" if threshold <= 7 else ("warning" if threshold <= 30 else "info")
+                    to_alert[urgency].append({
+                        **dict(c), "days_until": days_until
+                    })
+                    conn.execute(
+                        "INSERT INTO alerts (contract_id, alert_type, days_until_expiry) VALUES (?, ?, ?)",
+                        (c["id"], urgency, threshold)
+                    )
+                    alerted_any = True
                 break
 
-        if days_left < 0:
-            with get_db() as conn:
-                conn.execute(
-                    "UPDATE contracts SET status = 'expired' WHERE id = ?", (contract["id"],)
-                )
-                conn.commit()
+    if alerted_any:
+        total = sum(len(v) for v in to_alert.values())
+        subject = f"⚠️ Contract Radar: {total} contract{'s' if total > 1 else ''} need{'s' if total == 1 else ''} attention"
+        html = build_alert_email(to_alert)
+        alert_to = ALERT_EMAIL or SMTP_USER
+        if alert_to:
+            send_email(alert_to, subject, html)
 
-    if alerts_to_send:
-        send_expiry_alerts(alerts_to_send)
-        print(f"[Alerts] Sent {len(alerts_to_send)} contract expiry alerts")
+    conn.commit()
+    conn.close()
 
+
+def alert_scheduler():
+    while True:
+        try:
+            check_and_send_alerts()
+        except Exception as e:
+            print(f"Scheduler error: {e}")
+        time.sleep(3600)
+
+
+# ─── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
-    today = datetime.utcnow().date()
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM contracts ORDER BY end_date ASC")
-        cols = [d[0] for d in c.description]
-        contracts = [dict(zip(cols, r)) for r in c.fetchall()]
+async def dashboard(request: Request, db: sqlite3.Connection = Depends(get_db)):
+    contracts = db.execute("""
+        SELECT *,
+            julianday(end_date) - julianday('now') as days_until,
+            CASE
+                WHEN julianday(end_date) - julianday('now') <= 7 THEN 'critical'
+                WHEN julianday(end_date) - julianday('now') <= 30 THEN 'warning'
+                WHEN julianday(end_date) - julianday('now') <= 60 THEN 'attention'
+                ELSE 'ok'
+            END as urgency
+        FROM contracts WHERE status = 'active'
+        ORDER BY days_until ASC
+    """).fetchall()
 
-    rows = ""
-    for ct in contracts:
-        end = datetime.strptime(ct["end_date"], "%Y-%m-%d").date()
-        days_left = (end - today).days
-
-        if ct["status"] == "expired" or days_left < 0:
-            urgency_color = "#95a5a6"
-            urgency_label = "Expired"
-            days_label = f"{abs(days_left)}d ago"
-        elif days_left <= 7:
-            urgency_color = "#e74c3c"
-            urgency_label = "Critical"
-            days_label = f"{days_left}d left"
-        elif days_left <= 30:
-            urgency_color = "#e67e22"
-            urgency_label = "Expiring Soon"
-            days_label = f"{days_left}d left"
-        elif days_left <= 90:
-            urgency_color = "#f39c12"
-            urgency_label = "Watch"
-            days_label = f"{days_left}d left"
-        else:
-            urgency_color = "#27ae60"
-            urgency_label = "Active"
-            days_label = f"{days_left}d left"
-
-        value_str = f"{ct.get('currency','USD')} {ct.get('value') or 0:,.0f}" if ct.get("value") else "—"
-
-        rows += f"""<tr>
-            <td><strong>{ct['title']}</strong><br><span style='color:#999;font-size:12px'>{ct.get('notes','')[:60]}</span></td>
-            <td>{ct['counterparty']}</td>
-            <td>{ct.get('start_date','—')}</td>
-            <td>{ct['end_date']}</td>
-            <td><span style='font-weight:bold;color:{urgency_color}'>{days_label}</span></td>
-            <td><span style='background:{urgency_color};color:white;padding:2px 8px;border-radius:10px;font-size:11px'>{urgency_label}</span></td>
-            <td>{value_str}</td>
-            <td>{ct.get('renewal_type','—')}</td>
-            <td style='font-size:12px;color:#666'>{ct.get('email_alerts','—')}</td>
-            <td>
-                <button onclick='deleteContract({ct["id"]})' style='color:white;background:#e74c3c;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px'>Delete</button>
-                {f'<button onclick="renewContract({ct["id"]})" style="color:white;background:#27ae60;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px;margin-left:4px">Renew</button>' if ct["status"] != "expired" else ""}
-            </td>
-        </tr>"""
-
-    expiring_30 = len([c for c in contracts if 0 <= (datetime.strptime(c["end_date"], "%Y-%m-%d").date() - today).days <= 30])
-    expired = len([c for c in contracts if c["status"] == "expired"])
-
-    return f"""<!DOCTYPE html>
-<html><head><title>Contract Radar</title><meta charset='utf-8'>
-<style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin:0; background:#f5f7fa; }}
-  .header {{ background:linear-gradient(135deg,#2c3e50,#34495e); color:white; padding:20px 40px; }}
-  .header h1 {{ margin:0; font-size:24px; }}
-  .container {{ max-width:1400px; margin:28px auto; padding:0 24px; }}
-  .stats {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
-  .stat {{ background:white; padding:20px; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }}
-  .stat .num {{ font-size:32px; font-weight:bold; }}
-  .stat.warn .num {{ color:#e67e22; }}
-  .stat.danger .num {{ color:#e74c3c; }}
-  .card {{ background:white; border-radius:10px; padding:24px; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-bottom:24px; }}
-  h2 {{ font-size:15px; color:#2c3e50; margin:0 0 16px; }}
-  table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-  th {{ background:#f8f9fa; padding:9px 10px; text-align:left; font-size:11px; color:#666; text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid #eee; }}
-  td {{ padding:9px 10px; border-bottom:1px solid #f5f5f5; vertical-align:top; }}
-  tr:hover {{ background:#fafafa; }}
-  input, select, textarea {{ width:100%; padding:8px 10px; border:1px solid #ddd; border-radius:6px; font-size:13px; box-sizing:border-box; }}
-  .btn {{ padding:9px 18px; background:#2c3e50; color:white; border:none; border-radius:6px; cursor:pointer; font-size:13px; }}
-  .grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
-  label {{ font-size:12px; color:#555; margin-bottom:3px; display:block; margin-top:10px; }}
-</style>
-</head><body>
-<div class='header'>
-  <h1>📡 Contract Radar</h1>
-  <p style='margin:4px 0 0;opacity:0.8;font-size:13px'>Never miss a contract renewal or expiry</p>
-</div>
-<div class='container'>
-  <div class='stats'>
-    <div class='stat'><div class='num'>{len(contracts)}</div><div style='color:#999;font-size:13px'>Total Contracts</div></div>
-    <div class='stat warn'><div class='num'>{expiring_30}</div><div style='color:#999;font-size:13px'>Expiring in 30 Days</div></div>
-    <div class='stat danger'><div class='num'>{expired}</div><div style='color:#999;font-size:13px'>Expired</div></div>
-    <div class='stat'><div class='num'>${sum(c.get("value") or 0 for c in contracts):,.0f}</div><div style='color:#999;font-size:13px'>Total Contract Value</div></div>
-  </div>
-
-  <div class='card'>
-    <h2>Add Contract</h2>
-    <div class='grid'>
-      <div>
-        <label>Contract Title *</label>
-        <input id='title' placeholder='AWS Service Agreement' />
-        <label>Counterparty (Vendor/Client) *</label>
-        <input id='counterparty' placeholder='Amazon Web Services' />
-        <label>End Date (Expiry) *</label>
-        <input id='end_date' type='date' />
-        <label>Start Date</label>
-        <input id='start_date' type='date' />
-      </div>
-      <div>
-        <label>Contract Value</label>
-        <input id='value' type='number' placeholder='10000' />
-        <label>Renewal Type</label>
-        <select id='renewal_type'>
-          <option value='manual'>Manual Renewal</option>
-          <option value='auto-renew'>Auto-Renew</option>
-          <option value='one-time'>One-Time</option>
-        </select>
-        <label>Alert Email(s) (comma-separated)</label>
-        <input id='email_alerts' placeholder='legal@co.com, ops@co.com' />
-        <label>Reminder Days Before Expiry</label>
-        <input id='reminder_days' value='30,14,7' />
-      </div>
-    </div>
-    <label>Paste Contract Text (optional — auto-extracts dates)</label>
-    <textarea id='contract_text' rows='3' placeholder='Paste contract text here to auto-extract dates...'></textarea>
-    <br/><br/>
-    <button class='btn' onclick='addContract()'>Add Contract</button>
-    <button class='btn' onclick='runChecks()' style='margin-left:8px;background:#e74c3c'>🔔 Run Alert Check Now</button>
-    <div id='msg' style='margin-top:10px;font-size:13px'></div>
-  </div>
-
-  <div class='card'>
-    <h2>Contract Registry</h2>
-    <table>
-      <tr>
-        <th>Contract</th><th>Counterparty</th><th>Start</th><th>Expiry</th>
-        <th>Time Left</th><th>Status</th><th>Value</th><th>Renewal</th><th>Alerts</th><th>Actions</th>
-      </tr>
-      {rows or "<tr><td colspan='10' style='text-align:center;color:#999;padding:32px'>No contracts added yet.</td></tr>"}
-    </table>
-  </div>
-</div>
-<script>
-async function addContract() {{
-  const text = document.getElementById('contract_text').value.trim();
-  let endDate = document.getElementById('end_date').value;
-
-  if (text && !endDate) {{
-    const res = await fetch('/extract-dates', {{
-      method: 'POST',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{text}})
-    }});
-    const data = await res.json();
-    if (data.end_date) {{
-      endDate = data.end_date;
-      document.getElementById('end_date').value = endDate;
-    }}
-  }}
-
-  if (!document.getElementById('title').value || !document.getElementById('counterparty').value || !endDate) {{
-    document.getElementById('msg').innerHTML = '<span style="color:#e74c3c">Please fill in title, counterparty, and end date.</span>';
-    return;
-  }}
-
-  const body = {{
-    title: document.getElementById('title').value,
-    counterparty: document.getElementById('counterparty').value,
-    end_date: endDate,
-    start_date: document.getElementById('start_date').value || null,
-    value: parseFloat(document.getElementById('value').value) || null,
-    renewal_type: document.getElementById('renewal_type').value,
-    email_alerts: document.getElementById('email_alerts').value || null,
-    reminder_days: document.getElementById('reminder_days').value || '30,14,7',
-    contract_text: text || null,
-  }};
-
-  const res = await fetch('/contracts', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body)}});
-  const data = await res.json();
-  if (res.ok) {{
-    document.getElementById('msg').innerHTML = '<span style="color:#27ae60">✅ Contract added!</span>';
-    setTimeout(() => location.reload(), 1000);
-  }} else {{
-    document.getElementById('msg').innerHTML = `<span style="color:#e74c3c">Error: ${{data.detail}}</span>`;
-  }}
-}}
-
-async function deleteContract(id) {{
-  if (confirm('Delete this contract?')) {{
-    await fetch('/contracts/' + id, {{method: 'DELETE'}});
-    location.reload();
-  }}
-}}
-
-async function renewContract(id) {{
-  const newDate = prompt('Enter new expiry date (YYYY-MM-DD):');
-  if (newDate) {{
-    await fetch('/contracts/' + id, {{
-      method: 'PATCH',
-      headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{end_date: newDate, status: 'active'}})
-    }});
-    location.reload();
-  }}
-}}
-
-async function runChecks() {{
-  const res = await fetch('/alerts/run', {{method: 'POST'}});
-  const data = await res.json();
-  alert(data.message);
-}}
-</script>
-</body></html>"""
+    stats = db.execute("""
+        SELECT
+            COUNT(*) as total,
+            SUM(CASE WHEN julianday(end_date) - julianday('now') <= 30 THEN 1 ELSE 0 END) as expiring_soon,
+            SUM(CASE WHEN julianday(end_date) - julianday('now') <= 0 THEN 1 ELSE 0 END) as expired,
+            SUM(amount) as total_value,
+            SUM(CASE WHEN auto_renews = 1 THEN 1 ELSE 0 END) as auto_renew_count
+        FROM contracts WHERE status = 'active'
+    """).fetchone()
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, "contracts": contracts, "stats": stats
+    })
 
 
-@app.post("/contracts", status_code=201)
-def create_contract(contract: ContractCreate):
-    try:
-        datetime.strptime(contract.end_date, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="end_date must be YYYY-MM-DD")
-
-    extracted_dates = {}
-    if contract.contract_text:
-        extracted_dates = extract_dates_from_text(contract.contract_text)
-
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO contracts (title, counterparty, email_alerts, start_date, end_date,
-                renewal_type, value, currency, notes, reminder_days, extracted_dates)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            contract.title, contract.counterparty, contract.email_alerts,
-            contract.start_date or extracted_dates.get("start_date"),
-            contract.end_date,
-            contract.renewal_type, contract.value, contract.currency,
-            contract.notes, contract.reminder_days,
-            str(extracted_dates) if extracted_dates else None
-        ))
-        conn.commit()
-        return {"id": c.lastrowid, "message": "Contract added", "extracted_dates": extracted_dates}
+@app.post("/contracts", response_class=RedirectResponse)
+async def create_contract(
+    vendor_name: str = Form(...),
+    contract_name: str = Form(...),
+    category: str = Form("Other"),
+    start_date: str = Form(""),
+    end_date: str = Form(...),
+    amount: float = Form(0),
+    currency: str = Form("USD"),
+    billing_cycle: str = Form("Annual"),
+    auto_renews: int = Form(0),
+    notice_days: int = Form(30),
+    owner_email: str = Form(""),
+    notes: str = Form(""),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    db.execute(
+        """INSERT INTO contracts (vendor_name, contract_name, category, start_date, end_date,
+           amount, currency, billing_cycle, auto_renews, notice_days, owner_email, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (vendor_name, contract_name, category, start_date or None, end_date,
+         amount, currency, billing_cycle, auto_renews, notice_days, owner_email, notes)
+    )
+    db.commit()
+    return RedirectResponse("/", status_code=302)
 
 
-@app.get("/contracts")
-def list_contracts(status: Optional[str] = None):
-    with get_db() as conn:
-        c = conn.cursor()
-        if status:
-            c.execute("SELECT * FROM contracts WHERE status = ? ORDER BY end_date ASC", (status,))
-        else:
-            c.execute("SELECT * FROM contracts ORDER BY end_date ASC")
-        cols = [d[0] for d in c.description]
-        return [dict(zip(cols, r)) for r in c.fetchall()]
+@app.post("/contracts/{contract_id}/delete", response_class=RedirectResponse)
+async def delete_contract(contract_id: int, db: sqlite3.Connection = Depends(get_db)):
+    db.execute("UPDATE contracts SET status = 'archived' WHERE id = ?", (contract_id,))
+    db.commit()
+    return RedirectResponse("/", status_code=302)
 
 
-@app.patch("/contracts/{contract_id}")
-def update_contract(contract_id: int, update: ContractUpdate):
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("SELECT * FROM contracts WHERE id = ?", (contract_id,))
-        existing = c.fetchone()
-        if not existing:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        cols = [d[0] for d in c.description]
-        ct = dict(zip(cols, existing))
-
-        c.execute("""UPDATE contracts SET title=?, end_date=?, email_alerts=?, notes=?, status=?, reminder_days=?
-                     WHERE id=?""", (
-            update.title or ct["title"],
-            update.end_date or ct["end_date"],
-            update.email_alerts if update.email_alerts is not None else ct["email_alerts"],
-            update.notes if update.notes is not None else ct["notes"],
-            update.status or ct["status"],
-            update.reminder_days or ct["reminder_days"],
-            contract_id
-        ))
-        conn.commit()
-    return {"message": "Contract updated"}
+@app.post("/contracts/{contract_id}/renew", response_class=RedirectResponse)
+async def renew_contract(
+    contract_id: int,
+    new_end_date: str = Form(...),
+    db: sqlite3.Connection = Depends(get_db)
+):
+    db.execute("UPDATE contracts SET end_date = ? WHERE id = ?", (new_end_date, contract_id))
+    db.commit()
+    return RedirectResponse("/", status_code=302)
 
 
-@app.delete("/contracts/{contract_id}")
-def delete_contract(contract_id: int):
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM contracts WHERE id = ?", (contract_id,))
-        if c.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Contract not found")
-        conn.commit()
-    return {"message": "Contract deleted"}
+@app.post("/import-csv", response_class=RedirectResponse)
+async def import_csv(file: UploadFile = File(...), db: sqlite3.Connection = Depends(get_db)):
+    content = await file.read()
+    reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+    count = 0
+    for row in reader:
+        try:
+            db.execute(
+                """INSERT OR IGNORE INTO contracts (vendor_name, contract_name, category, end_date, amount, currency, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (row.get("vendor_name", ""), row.get("contract_name", ""), row.get("category", "Other"),
+                 row.get("end_date", ""), float(row.get("amount", 0) or 0),
+                 row.get("currency", "USD"), row.get("notes", ""))
+            )
+            count += 1
+        except Exception:
+            continue
+    db.commit()
+    return RedirectResponse(f"/?imported={count}", status_code=302)
 
 
-@app.post("/extract-dates")
-def extract_dates(body: dict):
-    text = body.get("text", "")
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
-    dates = extract_dates_from_text(text)
-    return dates
+@app.get("/export-csv")
+async def export_csv(db: sqlite3.Connection = Depends(get_db)):
+    contracts = db.execute("SELECT * FROM contracts WHERE status = 'active'").fetchall()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["vendor_name", "contract_name", "category", "start_date", "end_date",
+                     "amount", "currency", "billing_cycle", "auto_renews", "notice_days", "owner_email", "notes"])
+    for c in contracts:
+        writer.writerow([c["vendor_name"], c["contract_name"], c["category"], c["start_date"],
+                         c["end_date"], c["amount"], c["currency"], c["billing_cycle"],
+                         c["auto_renews"], c["notice_days"], c["owner_email"], c["notes"]])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=contracts.csv"}
+    )
 
 
-@app.post("/alerts/run")
-def trigger_alerts(background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_expiry_checks)
-    return {"message": "Alert check triggered — notifications will be sent if contracts are expiring."}
+@app.get("/api/contracts")
+async def list_contracts(db: sqlite3.Connection = Depends(get_db)):
+    rows = db.execute("SELECT * FROM contracts WHERE status = 'active' ORDER BY end_date").fetchall()
+    return [dict(r) for r in rows]
 
 
-@app.get("/upcoming")
-def upcoming_expirations(days: int = 90):
-    today = datetime.utcnow().date()
-    cutoff = today + timedelta(days=days)
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute(
-            "SELECT * FROM contracts WHERE status = 'active' AND end_date <= ? ORDER BY end_date ASC",
-            (cutoff.isoformat(),)
-        )
-        cols = [d[0] for d in c.description]
-        contracts = [dict(zip(cols, r)) for r in c.fetchall()]
-
-    for ct in contracts:
-        end = datetime.strptime(ct["end_date"], "%Y-%m-%d").date()
-        ct["days_until_expiry"] = (end - today).days
-    return contracts
+@app.post("/api/trigger-alerts")
+async def trigger_alerts():
+    check_and_send_alerts()
+    return {"success": True, "message": "Alert check completed"}
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8002, reload=True)
+    init_db()
+    t = threading.Thread(target=alert_scheduler, daemon=True)
+    t.start()
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8001")))

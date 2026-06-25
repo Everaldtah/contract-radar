@@ -1,124 +1,118 @@
 # Contract Radar
 
-**Never get auto-renewed into a contract you forgot about.** Contract Radar tracks all your vendor contracts, extracts key renewal dates, and sends alerts before you miss a deadline.
+> Never get blindsided by a contract renewal again. Track all your vendor contracts and SaaS subscriptions with automatic expiry alerts.
+
+---
 
 ## The Problem
 
-Freelancers and small agencies manage dozens of vendor contracts — SaaS subscriptions, office leases, service agreements, retainers. These are scattered across email threads, shared drives, and Notion pages. Companies get hit with surprise auto-renewals and miss opt-out windows, costing thousands. A single missed cancellation on an annual SaaS contract can cost $12,000+.
+Small and mid-size businesses silently waste thousands of dollars each year renewing contracts they meant to cancel — or worse, letting critical vendor agreements lapse unexpectedly. Spreadsheets get outdated. Reminders get missed.
 
-## What It Does
+**Contract Radar** is a lightweight contract lifecycle tracker that alerts you 60, 30, 14, 7, and 1 day(s) before any contract expires — so you can decide to renew, renegotiate, or cancel.
 
-- **Dashboard** — all contracts at a glance with color-coded urgency (red = expiring soon)
-- **Manual entry** — fill out a simple form with key dates and terms
-- **Smart text parser** — paste raw contract text and auto-extract dates, vendor name, value, notice periods
-- **Countdown timers** — days until expiry shown on every card
-- **Renewal deadline calculator** — "you must decide by [date]" based on notice period
-- **Alert banner** — immediate warning for contracts expiring within 30 days
-- **REST API** — integrate with your existing workflows
-- **Tagging system** — organize by category (cloud, lease, legal, etc.)
+---
+
+## Features
+
+- **Contract dashboard** — All contracts sorted by urgency (expiring soonest first)
+- **Automatic email alerts** — Configurable alert windows (60, 30, 14, 7, 1 days)
+- **Auto-renewal tracking** — Flag contracts that auto-renew so you don't miss cancellation windows
+- **CSV import/export** — Bulk-load existing contracts from spreadsheets
+- **Category organization** — SaaS, Legal, HR, Infrastructure, etc.
+- **Renewal tracking** — One-click renewal with new date
+- **Annual value tracking** — Know your total vendor spend at a glance
+
+---
 
 ## Tech Stack
 
-- **Framework**: Next.js 14 (React)
-- **Styling**: Tailwind CSS
-- **Parser**: Custom regex-based contract text extractor
-- **Data**: In-memory (swap for PostgreSQL + Prisma)
+- **Backend**: Python 3.11+ / FastAPI
+- **Database**: SQLite
+- **Templating**: Jinja2
+- **Email**: Python `smtplib` (SMTP)
+- **Scheduling**: Background thread
+
+---
 
 ## Installation
 
 ```bash
 git clone https://github.com/Everaldtah/contract-radar.git
 cd contract-radar
-npm install
+
+python -m venv venv
+source venv/bin/activate
+
+pip install -r requirements.txt
+
 cp .env.example .env
-npm run dev
+# Edit .env with your alert email and SMTP settings
+
+python main.py
 ```
 
-Open http://localhost:3000
+Open http://localhost:8001
 
-## Usage
+### Quick Start with Sample Data
 
-### Web UI
-
-1. Open the app and see pre-loaded demo contracts
-2. Click **Manual Entry** to add a contract with specific dates
-3. Click **Paste Text** to auto-parse a contract
-4. Filter by "Expiring", "Active", or "Expired"
-5. Delete contracts with the × button
-
-### API
-
-**List all contracts:**
 ```bash
-curl http://localhost:3000/api/contracts
+# Import sample contracts via the UI
+# Click "Import CSV" and upload sample_contracts.csv
 ```
 
-**Get contracts expiring within 30 days:**
-```bash
-curl "http://localhost:3000/api/contracts?expiring_within=30"
+---
+
+## CSV Import Format
+
+```csv
+vendor_name,contract_name,category,end_date,amount,currency,notes
+Salesforce,CRM Enterprise,SaaS,2026-09-30,36000,USD,Auto-renews 60 days notice
+AWS,Cloud Infrastructure,Cloud Infrastructure,2026-12-31,48000,USD,Reserved instances
 ```
 
-**Add a contract manually:**
-```bash
-curl -X POST http://localhost:3000/api/contracts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "GitHub Teams Plan",
-    "vendor": "GitHub",
-    "startDate": "2025-01-01",
-    "endDate": "2026-12-31",
-    "renewalNotice": 30,
-    "contractValue": 1188,
-    "autoRenews": true,
-    "tags": ["dev-tools", "saas"]
-  }'
+---
+
+## Alert Configuration
+
+Edit `.env`:
+```
+ALERT_DAYS=60,30,14,7,1     # Days before expiry to send alerts
+ALERT_EMAIL=ops@company.com  # Who receives the alerts
 ```
 
-**Parse contract from raw text:**
-```bash
-curl -X POST http://localhost:3000/api/contracts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "raw_text": "Service Agreement between Acme Corp and Vendor Inc. Effective Date: January 1, 2025. Expiration: December 31, 2026. Total value: $24,000. Auto-renewal: 60 days written notice required."
-  }'
-```
+---
 
-## Contract Fields
+## API Endpoints
 
-| Field | Description |
-|-------|-------------|
-| title | Contract name |
-| vendor | Vendor/supplier name |
-| startDate | Contract start (YYYY-MM-DD) |
-| endDate | Contract end (YYYY-MM-DD) |
-| renewalNotice | Days of notice required to cancel/not-renew |
-| contractValue | Annual or total contract value in USD |
-| autoRenews | Whether the contract auto-renews |
-| tags | Categories for filtering |
-| notes | Free-text notes |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Dashboard |
+| POST | `/contracts` | Add contract |
+| POST | `/contracts/{id}/renew` | Renew with new date |
+| POST | `/contracts/{id}/delete` | Archive contract |
+| GET | `/export-csv` | Export all contracts |
+| POST | `/import-csv` | Import from CSV |
+| GET | `/api/contracts` | JSON list |
+| POST | `/api/trigger-alerts` | Manual alert check |
+
+---
 
 ## Monetization Model
 
 | Plan | Price | Features |
 |------|-------|----------|
-| Free | $0 | Up to 5 contracts, email alerts |
-| Pro | $12/mo | Unlimited contracts, Slack alerts, PDF import |
-| Team | $29/mo | 5 seats, shared workspace, audit log |
-| Agency | $79/mo | Unlimited seats, client portals, API access |
+| **Free** | $0/mo | Up to 10 contracts |
+| **Business** | $19/mo | Unlimited contracts, multi-user, Slack alerts |
+| **Team** | $49/mo | Multiple workspaces, audit log, Jira integration |
+| **Enterprise** | $149/mo | SSO, custom alerts, ERP integrations, SLA |
 
-**Target customers**: Freelancers, small agencies, operations managers, legal teams at startups.
+**ROI story**: A single accidentally auto-renewed $36k Salesforce contract pays for years of subscription.
 
-**Unit economics**: The average freelancer manages 8–15 active contracts. Missing one auto-renewal = $500–$10,000 loss. This tool pays for itself in one saved cancellation.
+---
 
-## Roadmap
+## Traction Potential
 
-- [ ] PDF upload with text extraction (pdf-parse)
-- [ ] Email digest — weekly contract health report
-- [ ] Slack / Teams integration
-- [ ] Calendar sync (Google Calendar reminders)
-- [ ] Team sharing and permissions
-- [ ] AI-powered contract summarization
-
-## License
-
-MIT
+- **Every company has this problem** — vendor contracts are universal
+- **High switching cost** — once contracts are entered, users stay
+- **Procurement teams** are the buyer: well-defined budget and clear ROI
+- **Upsell path**: Start with 1 workspace, expand to multi-team, add integrations

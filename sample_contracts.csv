@@ -1,0 +1,9 @@
+vendor_name,contract_name,category,end_date,amount,currency,notes
+Salesforce,CRM Enterprise,SaaS,2026-09-30,36000,USD,Auto-renews 60 days notice
+AWS,Cloud Infrastructure,Cloud Infrastructure,2026-12-31,48000,USD,Reserved instances
+Slack,Business Plan,SaaS,2026-08-15,12000,USD,
+DocuSign,Standard Plan,SaaS,2026-07-10,3600,USD,
+HubSpot,Marketing Hub Pro,SaaS,2026-07-25,9600,USD,Review pricing before renewal
+Office 365,Microsoft 365 Business,Software,2026-10-01,8400,USD,
+Zoom,Business Plan,SaaS,2026-11-30,7200,USD,
+Adobe Creative Cloud,Team License,Software,2026-08-01,15600,USD,
